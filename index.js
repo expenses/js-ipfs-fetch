@@ -3,16 +3,11 @@ const parseRange = require('range-parser')
 const mime = require('mime/lite')
 const { CID } = require('multiformats/cid')
 const { base32 } = require('multiformats/bases/base32')
-const Busboy = require('busboy')
-const { Readable } = require('stream')
-const { EventIterator } = require('event-iterator')
-const crypto = require('crypto')
-const posixPath = require('path').posix
 const { exporter } = require('ipfs-unixfs-exporter')
 
 const ipfsTimeout = 30000
 const ipnsTimeout = 120000
-const SUPPORTED_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE']
+const SUPPORTED_METHODS = ['GET', 'HEAD', 'POST', 'PUT']
 
 module.exports = function makeIPFSFetch ({ ipfs }) {
   return makeFetch(async ({ url, headers: reqHeaders, method, signal, body }) => {
@@ -66,81 +61,6 @@ module.exports = function makeIPFSFetch ({ ipfs }) {
           data: ipfs.cat(path, { signal, timeout: ipfsTimeout })
         }
       }
-    }
-
-    async function uploadData (path, content, isFormData) {
-      const tmpDir = makeTmpDir()
-      const { rootCID, relativePath } = cidFromPath(path)
-
-      if (rootCID) {
-        await ipfs.files.cp(rootCID, tmpDir, {
-          parents: true,
-          cidVersion: 1,
-          signal,
-          timeout: ipfsTimeout
-        })
-      }
-
-      // Handle multipart formdata uploads
-      if (isFormData) {
-        const busboy = new Busboy({ headers: reqHeaders })
-
-        const toUpload = new EventIterator(({ push, stop, fail }) => {
-          busboy.once('error', fail)
-          busboy.once('finish', stop)
-
-          busboy.on('file', async (fieldName, fileData, fileName) => {
-            const finalPath = posixPath.join(tmpDir, relativePath, fileName)
-            try {
-              const result = ipfs.files.write(finalPath, Readable.from(fileData), {
-                cidVersion: 1,
-                parents: true,
-                truncate: true,
-                create: true,
-                rawLeaves: false,
-                signal,
-                timeout: ipfsTimeout
-              })
-              push(result)
-            } catch (e) {
-              fail(e)
-            }
-          })
-
-          // TODO: Does busboy need to be GC'd?
-          return () => {}
-        })
-
-        // Parse body as a multipart form
-        // TODO: Readable.from doesn't work in browsers
-        Readable.from(content).pipe(busboy)
-
-        // toUpload is an async iterator of promises
-        // We collect the promises (all files are queued for upload)
-        // Then we wait for all of them to resolve
-        await Promise.all(await collect(toUpload))
-      } else {
-        // Node.js and browsers handle pathnames differently for IPFS URLs
-        const path = posixPath.join(tmpDir, ensureStartingSlash(stripEndingSlash(relativePath)))
-
-        await ipfs.files.write(path, Readable.from(content), {
-          signal,
-          parents: true,
-          truncate: true,
-          create: true,
-          rawLeaves: false,
-          cidVersion: 1,
-          timeout: ipfsTimeout
-        })
-      }
-
-      const { cid } = await ipfs.files.stat(tmpDir, { hash: true, signal, timeout: ipfsTimeout })
-
-      const cidHash = cid.toString()
-      const endPath = isFormData ? relativePath : stripEndingSlash(relativePath)
-      const addedURL = `ipfs://${cidHash}${ensureStartingSlash(endPath)}`
-
-      return addedURL
     }
 
     // Split out IPNS info and put it back together to resolve.
@@ -333,44 +253,6 @@ module.exports = function makeIPFSFetch ({ ipfs }) {
           const value = rawValue.replace(/^ipfs:\/\//, '/ipfs/').replace(/^ipns:\/\//, '/ipns/')
           return updateIPNS(keyName, value)
         }
-      } else if (method === 'DELETE') {
-        if (protocol === 'ipns:') {
-          ipfsPath = await resolveIPNS(ipfsPath)
-        }
-
-        const tmpDir = makeTmpDir()
-        const { rootCID, relativePath } = cidFromPath(ipfsPath)
-
-        if (rootCID) {
-          await ipfs.files.cp(rootCID, tmpDir, {
-            parents: true,
-            cidVersion: 1,
-            signal,
-            timeout: ipfsTimeout
-          })
-        }
-
-        await ipfs.files.rm(posixPath.join(tmpDir, relativePath), {
-          recursive: true,
-          cidVersion: 1,
-          signal,
-          timeout: ipfsTimeout
-        })
-
-        const { cid } = await ipfs.files.stat(tmpDir, {
-          hash: true,
-          signal,
-          timeout: ipfsTimeout
-        })
-
-        const cidHash = cid.toString()
-        const addedURL = `ipfs://${cidHash}/`
-
-        return {
-          statusCode: 200,
-          headers,
-          data: intoAsyncIterable(addedURL)
-        }
       } else {
         return {
           statusCode: 405,
@@ -436,11 +318,6 @@ function getMimeType (path) {
   let mimeType = mime.getType(path) || 'text/plain'
   if (mimeType.startsWith('text/')) mimeType = `${mimeType}; charset=utf-8`
   return mimeType
-}
-
-function makeTmpDir () {
-  const random = crypto.randomBytes(8).toString('hex')
-  return `/ipfs-fetch-dirs/${random}`
 }
 
 function cidFromPath (path) {
