@@ -55,10 +55,12 @@ module.exports = function makeIPFSFetch ({ ipfs }) {
         }
       } else {
         headers['Content-Length'] = `${size}`
+        const fixed_path = path.substring(1);
+
         return {
           statusCode: 200,
           headers,
-          data: ipfs.cat(path, { signal, timeout: ipfsTimeout })
+          data: ipfs.cat(fixed_path, { signal, timeout: ipfsTimeout })
         }
       }
     }
